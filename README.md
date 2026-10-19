@@ -31,6 +31,24 @@ which becomes the panel's banner. `--url` (or `TAILSERVE_URL`) names the
 service; it defaults to `http://127.0.0.1:43121`, where the livecraft backend
 serves these routes.
 
+## Grouping: the Tern pane the work lives in
+
+Ports are grouped by the **Tern pane whose process tree holds them** — a pane
+is where the work that opened a port actually lives, and its title says what
+that work is (for an agent pane, the session's own title). The lookup is three
+local reads: `tern ls --json` for the session/tab/pane tree, `tern process
+<pane> --json` per pane for its process ids, then `/proc` and `ss -tlnp` to
+walk a listener up to the pane that holds it. `G` switches to the
+pi-livecraft session scopes behind the same list, and `--once`/a pipe falls
+back to them automatically, so nothing depends on Tern being there.
+
+| Where a port came from | How it is shown |
+|---|---|
+| a Tern pane's process tree or foreground job | that pane's group, named by its title, with `Default · tab 1 · omp` under it |
+| the pane this panel runs in | the same group, with a `this pane` badge |
+| a pane whose process escaped both its tree and its job group | the backend's session scope, or the unattributed list |
+| no Tern daemon at all | the session scopes, then "Other ports" |
+
 ## Keys
 
 | Key | Does |
@@ -42,6 +60,7 @@ serves these routes.
 | `m` | mount it at a path under 443, with the process name as the slug |
 | `x` | remove the selected handler |
 | `f` `s` `/` | filter by port, process, address or handler URL |
+| `G` | group by Tern panes (default) or livecraft sessions |
 | `r` | refresh now | 
 | `q` | quit |
 
@@ -52,12 +71,13 @@ per its clipboard policy.
 
 ## What the list shows
 
-Ports grouped by the session whose tools opened them, then everything else —
-served ports first, then by process name — then handlers whose target port is
-not in the list, which stay removable. A session's own process (the scope
-root) is hidden; naming it in the filter pulls it back in. A port that 127.0.0.1
-cannot reach cannot be served: its row says so and its expose controls are
-inert, as is every expose control when the tailscale CLI is unavailable.
+The groups above, then everything no group claims — served ports first, then
+by process name — then handlers whose target port is not in the list, which
+stay removable. A port that 127.0.0.1 cannot reach cannot be served: its row
+says so and its expose controls are inert, as is every expose control when the
+tailscale CLI is unavailable. A session's own process is labelled
+`session process`, and inside a Tern window Tern's live pane list is the
+authority on which panes exist — no polling of the daemon beyond a refresh.
 
 ## Outside Tern
 

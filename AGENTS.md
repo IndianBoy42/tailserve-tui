@@ -12,10 +12,21 @@ them. Node ≥22 runs the sources directly; there is no build step.
 | `src/model.ts` | All semantics: snapshot → sections/rows, keys → state and intents. Pure, no I/O |
 | `src/view.ts` | The document (`{main, dock, layer}`) and the program stylesheet |
 | `src/main.ts` | argv/env, the Tern session loop, intent execution, the plain fallback |
+| `src/tern.ts` | which Tern pane holds each port: `tern ls`/`tern process`, `/proc`, `ss` — every call degrades to nothing |
 
 Keep it that way: every decision belongs in `model.ts` so tests drive keys
 without a terminal, and node ids derive from `key` props — if a tree level
 gains or loses a key, `FILTER_ID`, `MOUNT_DRAFT_ID` and `rowNodeId` change with it.
+`computeSections` takes the grouping and the pane attribution as arguments, so
+grouping is testable without a daemon; `tern.ts` is the only module allowed to
+spawn a process or read `/proc`.
+
+Pane attribution has three failure modes worth knowing, all of them silent by
+design: no `tern` on `PATH` (a pane's `TERN_ACP` is often the empty string, so
+never use `?? 'tern'` on it), no daemon, and another user's panes. Inside a
+pane the environment is authoritative: `TERN_PANE`, `TERN_PANE_SOCKET` and the
+pane's own cgroup `/proc/self/cgroup` (`…/tern/pane-<id>.scope`) name where the
+program runs even when nothing else is readable.
 
 ## Checks
 

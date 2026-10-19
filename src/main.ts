@@ -2,6 +2,7 @@
 import { connect, print, type Session } from '@stencil-hq/tern'
 import type { TailnetPort } from './tailnet.ts'
 import { DEFAULT_BASE, TailnetApi } from './api.ts'
+import { resolvePaneOwnership } from './tern.ts'
 import {
   exposureKey,
   exposeIntent,
@@ -97,19 +98,27 @@ function parseArgs(argv: readonly string[], env: Readonly<Record<string, string 
 }
 
 /**
- * One snapshot, kept as the program's view: a failure keeps the last one and
- * shows the banner, so a transient blip never empties the panel.
+ * One snapshot plus the Tern pane attribution it is grouped by, kept as the
+ * program's view: a failure keeps the last snapshot and shows the banner, so
+ * a transient blip never empties the panel. The two run together — the pane
+ * lookup spawns `tern` per pane, which is the slower half.
  */
 async function refresh(model: TailnetModel, api: TailnetApi): Promise<void> {
-  try {
-    model.snapshot = await api.snapshot()
-    model.error = null
-  } catch (cause) {
-    model.error = cause instanceof Error ? cause.message : String(cause)
-  } finally {
-    model.loading = false
-    model.refreshedAt = Date.now()
-  }
+  const [snapshot, ownership] = await Promise.all([
+    api.snapshot().then(
+      (value) => ({ value, error: null as string | null }),
+      (cause: unknown) => ({
+        value: null,
+        error: cause instanceof Error ? cause.message : String(cause),
+      }),
+    ),
+    resolvePaneOwnership(),
+  ])
+  if (snapshot.value !== null) model.snapshot = snapshot.value
+  model.ownership = ownership
+  model.error = snapshot.error
+  model.loading = false
+  model.refreshedAt = Date.now()
 }
 
 /** One tailscale action: busy while it runs, a notice and a refresh on success. */

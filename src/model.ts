@@ -6,6 +6,7 @@ import type {
   TailnetSnapshot,
   TailnetUnexposeRequest,
 } from './tailnet.ts'
+import { noOwnership, paneCommand, paneLabel, type Pane, type PaneOwnership } from './tern.ts'
 
 /** Poll cadence: a spawned dev server should show up without a manual refresh. */
 export const POLL_MS = 5_000
@@ -21,16 +22,31 @@ export type Row =
   | { kind: 'port'; key: string; port: TailnetPort; exposures: readonly TailnetExposure[] }
   | { kind: 'handler'; key: string; exposure: TailnetExposure }
 
-/** The ports and handlers of one session scope. */
+/** What a group names: a Tern pane, a session scope, or everything unattributed. */
+export type GroupKind = 'pane' | 'session'
+
+/** One group of ports: a Tern pane, a session scope, or the unattributed rest. */
 export interface PortGroup {
+  /** Group key, heading the section and every row id under it. */
   id: string
+  /** The heading's first span. */
   name: string
+  /** Extra heading spans: where in Tern, and which program. */
+  meta: string[]
+  kind: GroupKind | null
+  /** True for the pane the panel itself runs in. */
+  own: boolean
+  /** The scope-root process count the old widget hid; the TUI keeps them. */
+  mainOnly: number
   ports: TailnetPort[]
 }
 
+/** What the panel groups ports by. */
+export type Grouping = 'panes' | 'sessions'
+
 /** Everything the view draws, computed from one snapshot and the filter. */
 export interface Sections {
-  /** Session groups, ports a session's tools opened, filtered and non-empty. */
+  /** The groups a pane or a session scope owns, in draw order. */
   groups: PortGroup[]
   /** Everything else listening, served ports first, filtered. */
   others: TailnetPort[]
@@ -43,6 +59,8 @@ export interface Sections {
   /** Ports left by the filter, and every port the snapshot holds. */
   visible: number
   total: number
+  /** The grouping this was computed with. */
+  grouping: Grouping
 }
 
 /** A side effect the session loop runs; `handleKey` only decides. */
@@ -128,12 +146,8 @@ function byProcessThenPort(left: TailnetPort, right: TailnetPort): number {
   return left.port - right.port
 }
 
-/**
- * The visible port groups, other ports, unmatched handlers and the flat row
- * list — the grouping, ordering and filter the panel's rows share.
- */
-export function computeSections(snapshot: TailnetSnapshot | null, filter: string): Sections {
-  const ports = snapshot?.ports ?? []
+/** The handlers of one port, in the order the snapshot lists them. */
+function exposureIndex(snapshot: TailnetSnapshot | null): Map<number, TailnetExposure[]> {
   const byPort = new Map<number, TailnetExposure[]>()
   for (const handler of snapshot?.exposures ?? []) {
     if (handler.targetPort === undefined) continue
@@ -141,40 +155,111 @@ export function computeSections(snapshot: TailnetSnapshot | null, filter: string
     list.push(handler)
     byPort.set(handler.targetPort, list)
   }
-  const query = filter.trim().toLowerCase()
-  const sessionPorts = ports.filter((port) =>
-    port.owners.some((owner) => owner.sessionMain === true)
-  )
+  return byPort
+}
 
-  const bySession = new Map<string, PortGroup>()
-  for (const port of ports) {
-    // The session's own Pi process (the scope root) is not something to share:
-    // only the tools it spawned belong in the session's list.
-    if (port.owners.some((owner) => owner.sessionMain === true)) continue
-    const owner = port.owners.find((entry) => entry.sessionId !== undefined)
-    if (owner?.sessionId === undefined) continue
-    const group = bySession.get(owner.sessionId) ?? {
-      id: owner.sessionId,
-      name: owner.sessionName ?? 'Session',
+/**
+ * Groups ports by the Tern pane whose process tree holds them — the reason
+ * the panel is a Tern program rather than a shell: a pane is where the work
+ * that opened a port actually lives, and its title says what the work is.
+ *
+ * A port whose pane cannot be read (no daemon, another user, a daemon that
+ * escaped both its pane's process tree and its job-control group) falls
+ * through to the backend's session attribution, so nothing is lost.
+ */
+export function paneGroups(
+  snapshot: TailnetSnapshot | null,
+  ownership: PaneOwnership,
+): { groups: PortGroup[]; claimed: Set<number> } {
+  const byPane = new Map<number, PortGroup>()
+  const claimed = new Set<number>()
+  for (const port of snapshot?.ports ?? []) {
+    const panes = ownership.byPort.get(port.port)
+    const pane = panes?.[0]
+    if (pane === undefined) continue
+    claimed.add(port.port)
+    const group = byPane.get(pane.id) ?? {
+      id: `pane:${String(pane.id)}`,
+      name: paneLabel(pane),
+      meta: [
+        `${pane.session} · tab ${String(pane.tab)}`,
+        `· ${paneCommand(pane)}`,
+        ...(pane.own ? ['· this pane'] : []),
+      ],
+      kind: 'pane' as const,
+      own: pane.own,
+      mainOnly: 0,
       ports: [],
     }
+    if (port.owners.every((owner) => owner.sessionMain === true)) group.mainOnly += 1
+    group.ports.push(port)
+    byPane.set(pane.id, group)
+  }
+  const groups = [...byPane.values()].sort((left, right) =>
+    Number(left.name.toLowerCase() > right.name.toLowerCase())
+    - Number(left.name.toLowerCase() < right.name.toLowerCase())
+    || left.name.localeCompare(right.name)
+  )
+  return { groups, claimed }
+}
+
+/** Groups ports by the pi-livecraft session scope that spawned them. */
+function sessionGroups(
+  snapshot: TailnetSnapshot | null,
+): { groups: PortGroup[]; claimed: Set<number> } {
+  const bySession = new Map<string, PortGroup>()
+  const claimed = new Set<number>()
+  for (const port of snapshot?.ports ?? []) {
+    const owner = port.owners.find((entry) => entry.sessionId !== undefined)
+    if (owner?.sessionId === undefined) continue
+    claimed.add(port.port)
+    const group = bySession.get(owner.sessionId) ?? {
+      id: `session:${owner.sessionId}`,
+      name: owner.sessionName ?? 'Session',
+      meta: [],
+      kind: 'session' as const,
+      own: false,
+      mainOnly: 0,
+      ports: [],
+    }
+    if (port.owners.some((entry) => entry.sessionMain === true)) group.mainOnly += 1
     group.ports.push(port)
     bySession.set(owner.sessionId, group)
   }
-  const groups = [...bySession.values()]
-    .sort((left, right) => left.name.localeCompare(right.name))
+  return {
+    groups: [...bySession.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    claimed,
+  }
+}
+
+/**
+ * The visible port groups, other ports, unmatched handlers and the flat row
+ * list — the grouping, ordering and filter the panel's rows share.
+ *
+ * Session scope roots (a session's own Pi process) are grouped like any other
+ * port here: a terminal panel can show the thing that listens, and the tag
+ * says what it is, where the web widget hid it.
+ */
+export function computeSections(
+  snapshot: TailnetSnapshot | null,
+  filter: string,
+  grouping: Grouping = 'panes',
+  ownership: PaneOwnership = noOwnership(),
+): Sections {
+  const ports = snapshot?.ports ?? []
+  const byPort = exposureIndex(snapshot)
+  const query = filter.trim().toLowerCase()
+  const built = grouping === 'panes' ? paneGroups(snapshot, ownership) : sessionGroups(snapshot)
+
+  const groups = built.groups
     .map((group) => ({
       ...group,
       ports: group.ports.filter((port) => matchesFilter(port, exposuresOf(byPort, port), query)),
     }))
     .filter((group) => group.ports.length > 0)
 
-  // Pushed under "Other ports" when the filter names it, so a session port
-  // stays findable by search without sitting in the session's list.
-  const others = [
-    ...ports.filter((port) => !port.owners.some((owner) => owner.sessionId !== undefined)),
-    ...(query === '' ? [] : sessionPorts),
-  ]
+  const others = ports
+    .filter((port) => !built.claimed.has(port.port))
     // Served ports first, then by process name, so a busy host reads top-down.
     .sort((left, right) =>
       exposuresOf(byPort, right).length - exposuresOf(byPort, left).length
@@ -192,7 +277,7 @@ export function computeSections(snapshot: TailnetSnapshot | null, filter: string
     for (const port of group.ports) {
       rows.push({
         kind: 'port',
-        key: `port:${String(port.port)}`,
+        key: `${group.id}:port:${String(port.port)}`,
         port,
         exposures: exposuresOf(byPort, port),
       })
@@ -204,7 +289,7 @@ export function computeSections(snapshot: TailnetSnapshot | null, filter: string
   for (const port of others) {
     rows.push({
       kind: 'port',
-      key: `port:${String(port.port)}`,
+      key: `o:port:${String(port.port)}`,
       port,
       exposures: exposuresOf(byPort, port),
     })
@@ -217,7 +302,16 @@ export function computeSections(snapshot: TailnetSnapshot | null, filter: string
   }
 
   const visible = groups.reduce((total, group) => total + group.ports.length, 0) + others.length
-  return { groups, others, handlers, rows, exposures: byPort, visible, total: ports.length }
+  return {
+    groups,
+    others,
+    handlers,
+    rows,
+    exposures: byPort,
+    visible,
+    total: ports.length,
+    grouping,
+  }
 }
 
 /** Moves a UTF-16 caret one code point, so a surrogate pair is never split. */
@@ -267,6 +361,10 @@ export class TailnetModel {
   /** Backend origin; fixed for the process's life. */
   readonly url: string
   snapshot: TailnetSnapshot | null = null
+  /** Which Tern pane holds each listening port, as of the same refresh. */
+  ownership: PaneOwnership = noOwnership()
+  /** What the rows group by; the panel runs in Tern, so panes by default. */
+  grouping: Grouping = 'panes'
   /** Transport failure, or the snapshot's own tailnet error. */
   error: string | null = null
   /** The last thing Tern rejected (a bad node, a dropped CSS declaration). */
@@ -292,23 +390,47 @@ export class TailnetModel {
   cursorIndex = 0
   private noticeSeq = 0
   private cached: Sections = computeSections(null, '')
-  private cachedFor: { snapshot: TailnetSnapshot | null; filter: string } = {
-    snapshot: null,
-    filter: '',
-  }
+  private cachedFor: {
+    snapshot: TailnetSnapshot | null
+    filter: string
+    grouping: Grouping
+    ownership: PaneOwnership
+  } = { snapshot: null, filter: '', grouping: 'panes', ownership: noOwnership() }
 
   constructor(url: string) {
     this.url = url
   }
 
-  /** The sections for the current snapshot and filter, computed when they change. */
+  /** The sections for the current snapshot, filter, grouping and ownership. */
   sync(): Sections {
-    if (this.cachedFor.snapshot !== this.snapshot || this.cachedFor.filter !== this.filter) {
-      this.cachedFor = { snapshot: this.snapshot, filter: this.filter }
-      this.cached = computeSections(this.snapshot, this.filter)
+    const cache = this.cachedFor
+    if (
+      cache.snapshot !== this.snapshot
+      || cache.filter !== this.filter
+      || cache.grouping !== this.grouping
+      || cache.ownership !== this.ownership
+    ) {
+      this.cachedFor = {
+        snapshot: this.snapshot,
+        filter: this.filter,
+        grouping: this.grouping,
+        ownership: this.ownership,
+      }
+      this.cached = computeSections(this.snapshot, this.filter, this.grouping, this.ownership)
       this.reconcile(this.cached.rows)
     }
     return this.cached
+  }
+
+  /** Switches the grouping under the cursor, keeping the row it pointed at. */
+  toggleGrouping(): void {
+    this.grouping = this.grouping === 'panes' ? 'sessions' : 'panes'
+    this.sync()
+  }
+
+  /** The panes holding a port, when the panel could attribute it. */
+  panesOf(port: TailnetPort): readonly Pane[] {
+    return this.ownership.byPort.get(port.port) ?? []
   }
 
   row(rows: readonly Row[]): Row | null {
@@ -508,6 +630,9 @@ export function handleKey(model: TailnetModel, key: Key): Intent[] {
     case 'o':
       if (key.shift) model.folded.handlers = !model.folded.handlers
       else model.folded.others = !model.folded.others
+      return []
+    case 'G':
+      model.toggleGrouping()
       return []
     case 'escape':
       if (model.openPort !== null) model.openPort = null

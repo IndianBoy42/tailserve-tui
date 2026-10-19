@@ -10,29 +10,29 @@ import {
   type TailnetModel,
 } from './model.ts'
 
+/** The section key a port is drawn under: its group, `others`, or nothing. */
+function groupKeyOf(sections: Sections, port: number): string {
+  const group = sections.groups.find((entry) => entry.ports.some((held) => held.port === port))
+  if (group !== undefined) return `g:${group.id}`
+  return sections.others.some((held) => held.port === port) ? 'others' : ''
+}
+
 /**
  * Where the cursor's row lives in the view, for `surface.reveal`. Ids derive
- * from keys (`<region>.<key>.<key>…`), so this mirrors the tree below.
+ * from keys (`<region>.<key>.<key>…`), so this mirrors the tree below: a port
+ * row is keyed `<group>:port:<n>`, and a handler shares its port's key so the
+ * two resolve to one element.
  */
 export function rowNodeId(model: TailnetModel, row: Row): string | null {
   const sections = model.sync()
   if (row.kind === 'handler') {
-    const owner = sections.groups
-      .concat([{ id: '', name: '', ports: sections.others }])
-      .find((group) => group.ports.some((port) => port.port === row.exposure.targetPort))
-    if (owner !== undefined) {
-      const key = owner.id === '' ? 'others' : `g:${owner.id}`
-      return `main.${key}.port:${String(row.exposure.targetPort)}`
-    }
+    const port = row.exposure.targetPort ?? -1
+    const key = groupKeyOf(sections, port)
+    if (key !== '') return `main.${key}.port:${String(port)}`
     return model.folded.handlers ? null : `main.handlers.${row.key}`
   }
-  const group = sections.groups.find((entry) =>
-    entry.ports.some((port) => port.port === row.port.port)
-  )
-  if (group !== undefined) return `main.g:${group.id}.${row.key}`
-  return sections.others.some((port) => port.port === row.port.port)
-    ? `main.others.${row.key}`
-    : null
+  const key = groupKeyOf(sections, row.port.port)
+  return key === '' ? null : `main.${key}.port:${String(row.port.port)}`
 }
 
 /** The filter field's node id (`<region>.<key>.<key>`); mirrors the tree below. */
@@ -203,6 +203,8 @@ function portRow(
   const open = model.openPort === port.port
   const canExpose = model.canExpose(port)
   const mainOnly = port.owners.every((owner) => owner.sessionMain === true)
+  const panes = model.panesOf(port)
+  const own = panes.some((pane) => pane.own)
   const blocked = model.snapshot?.available !== true
     ? 'tailscale is unavailable'
     : 'the port is not reachable at 127.0.0.1'
@@ -211,6 +213,7 @@ function portRow(
       spans: [span(portProcesses(port), 'strong'), span(` :${String(port.port)}`, 'num muted')],
     }),
     exposures.length === 0 ? null : ui.badge({ key: 'live', text: 'live', tone: 'success' }),
+    own ? ui.badge({ key: 'own', text: 'this pane', tone: 'accent' }) : null,
     mainOnly ? ui.badge({ key: 'main', text: 'session process', tone: 'muted' }) : null,
     port.proxyable ? null : ui.badge({ key: 'warn', text: 'not on 127.0.0.1', tone: 'warning' }),
   ]
@@ -346,12 +349,30 @@ function statusBar(model: TailnetModel, sections: Sections): Node {
   const age = model.refreshedAt === 0
     ? 0
     : Math.round((Date.now() - model.refreshedAt) / 1000) * 1000
+  const panes = model.ownership.panes.length
+  const attributed = [...model.ownership.byPort.keys()].length
   return ui.status({ role: 'tailserve.status' }, [
     ui.seg({
       key: 'busy',
       hidden: model.busy === null,
       icon: 'timer',
       spans: [span(model.busy ?? 'working', 'muted')],
+    }),
+    ui.seg({
+      key: 'mode',
+      priority: 5,
+      icon: model.grouping === 'panes' ? 'compass' : 'shield',
+      tone: model.grouping === 'panes' ? 'accent' : 'neutral',
+      spans: [
+        span(model.grouping === 'panes' ? 'Tern panes' : 'livecraft sessions', 'strong'),
+        span(
+          panes === 0
+            ? '  · no Tern daemon'
+            : `  · ${String(attributed)}/${String(sections.total)} in ${String(panes)} panes`,
+          'muted',
+        ),
+      ],
+      title: 'Group ports by: G switches',
     }),
     ui.seg({
       key: 'keys',
@@ -369,6 +390,8 @@ function statusBar(model: TailnetModel, sections: Sections): Node {
         span(' remove · '),
         span('/', 'key'),
         span(' filter · '),
+        span('G', 'key'),
+        span(' group · '),
         span('r', 'key'),
         span(' refresh · '),
         span('q', 'key'),
@@ -423,8 +446,10 @@ export function buildView(model: TailnetModel, actions: ViewActions): Renderable
         section(
           `g:${group.id}`,
           [
+            span(group.kind === 'pane' ? '▣ ' : '', group.own ? 'accent' : 'muted'),
             span(group.name, 'strong'),
             span(`  ${String(group.ports.length)} port${group.ports.length === 1 ? '' : 's'}`, 'muted'),
+            ...group.meta.map((part) => span(`  ${part}`, group.own ? 'accent' : 'muted')),
           ],
           group.ports.map((port) =>
             portRow(port, exposuresOf(sections.exposures, port), model, actions)
