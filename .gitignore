@@ -1,0 +1,5 @@
+node_modules/
+*.log
+
+# Verification scratch: headless Tern windows and their screenshots.
+.tmp/

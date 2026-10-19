@@ -1,0 +1,23 @@
+{
+  "name": "tailserve-tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The tailscale serve panel as a Tern surface: local ports, their handlers, and one-key exposing.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test",
+    "typecheck": "tsc",
+    "stub": "node scripts/stub-service.ts"
+  },
+  "dependencies": {
+    "@stencil-hq/tern": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "~6.0.2"
+  }
+}
